@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 
 /**
- * MCP server that reads rules from ~/.roo/rules directory and provides them as resources.
- * It reads all .md files from /Users/nanli/.roo/rules and exposes them as MCP resources
- * for automatic injection into context. Includes file system watching for automatic updates.
+ * MCP server that reads rules from GitHub repository and provides them as resources.
+ * It fetches all .md files from the rules/ directory in the GitHub repo and exposes them as MCP resources
+ * for automatic injection into context. Includes polling for automatic updates.
  */
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -12,8 +12,6 @@ import {
   ListResourcesRequestSchema,
   ReadResourceRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import * as fs from "fs";
-import * as path from "path";
 
 /**
  * Type alias for a rule object.
@@ -22,112 +20,182 @@ type Rule = {
   filename: string;
   title: string;
   content: string;
+  sha: string;
 };
 
 /**
- * Path to the rules directory
+ * GitHub repository configuration
  */
-const RULES_DIR = "/Users/nanli/.roo/rules";
+const GITHUB_OWNER = "ln613";
+const GITHUB_REPO = "roo-rules-server";
+const GITHUB_BRANCH = "master";
+const RULES_PATH = "rules";
+
+/**
+ * Polling interval in milliseconds (60 seconds)
+ */
+const POLL_INTERVAL = 60000;
 
 /**
  * Cached rules data
  */
 let cachedRules: { [filename: string]: Rule } = {};
-let lastLoadTime = 0;
+let lastEtag: string | null = null;
 
 /**
- * Function to read all .md files from the rules directory
+ * Extract title from markdown content
  */
-function loadRules(): { [filename: string]: Rule } {
+function extractTitle(content: string, filename: string): string {
+  const lines = content.split('\n');
+  for (const line of lines) {
+    const match = line.match(/^#\s+(.+)$/);
+    if (match) {
+      return match[1].trim();
+    }
+  }
+  return filename.replace('.md', '');
+}
+
+/**
+ * Fetch rules from GitHub repository
+ */
+async function fetchRulesFromGitHub(): Promise<{ [filename: string]: Rule }> {
   const rules: { [filename: string]: Rule } = {};
   
   try {
-    if (!fs.existsSync(RULES_DIR)) {
-      console.error(`Rules directory does not exist: ${RULES_DIR}`);
-      return rules;
+    // Fetch directory listing from GitHub API
+    const apiUrl = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents/${RULES_PATH}?ref=${GITHUB_BRANCH}`;
+    
+    const headers: HeadersInit = {
+      'Accept': 'application/vnd.github.v3+json',
+      'User-Agent': 'roo-rules-server'
+    };
+    
+    if (lastEtag) {
+      headers['If-None-Match'] = lastEtag;
     }
-
-    const files = fs.readdirSync(RULES_DIR);
-    const mdFiles = files.filter(file => file.endsWith('.md'));
-
-    for (const filename of mdFiles) {
-      const filePath = path.join(RULES_DIR, filename);
+    
+    const response = await fetch(apiUrl, { headers });
+    
+    if (response.status === 304) {
+      // Not modified, return cached rules
+      console.error('GitHub rules not modified, using cache');
+      return cachedRules;
+    }
+    
+    if (!response.ok) {
+      throw new Error(`GitHub API error: ${response.status} ${response.statusText}`);
+    }
+    
+    // Store etag for future requests
+    const newEtag = response.headers.get('etag');
+    if (newEtag) {
+      lastEtag = newEtag;
+    }
+    
+    const files = await response.json() as Array<{
+      name: string;
+      sha: string;
+      download_url: string;
+      type: string;
+    }>;
+    
+    // Filter for .md files
+    const mdFiles = files.filter(file => 
+      file.type === 'file' && file.name.endsWith('.md')
+    );
+    
+    // Fetch content for each file
+    for (const file of mdFiles) {
       try {
-        const content = fs.readFileSync(filePath, 'utf-8');
+        const contentResponse = await fetch(file.download_url, {
+          headers: { 'User-Agent': 'roo-rules-server' }
+        });
         
-        // Extract title from the first heading or use filename
-        const lines = content.split('\n');
-        let title = filename.replace('.md', '');
-        
-        // Look for the first # heading
-        for (const line of lines) {
-          const match = line.match(/^#\s+(.+)$/);
-          if (match) {
-            title = match[1].trim();
-            break;
-          }
+        if (!contentResponse.ok) {
+          console.error(`Error fetching ${file.name}: ${contentResponse.status}`);
+          continue;
         }
-
-        rules[filename] = {
-          filename,
+        
+        const content = await contentResponse.text();
+        const title = extractTitle(content, file.name);
+        
+        rules[file.name] = {
+          filename: file.name,
           title,
-          content
+          content,
+          sha: file.sha
         };
       } catch (error) {
-        console.error(`Error reading file ${filename}:`, error);
+        console.error(`Error fetching content for ${file.name}:`, error);
       }
     }
+    
+    console.error(`Loaded ${Object.keys(rules).length} rules from GitHub`);
+    
   } catch (error) {
-    console.error(`Error reading rules directory:`, error);
+    console.error('Error fetching rules from GitHub:', error);
+    // Return cached rules if fetch fails
+    if (Object.keys(cachedRules).length > 0) {
+      console.error('Returning cached rules due to fetch error');
+      return cachedRules;
+    }
   }
-
+  
   return rules;
 }
 
 /**
- * Function to get rules with caching and automatic refresh
+ * Function to get rules with caching
  */
-function getRules(): { [filename: string]: Rule } {
-  // Always reload rules to ensure we have the latest content
-  // This ensures changes to existing files are picked up immediately
-  cachedRules = loadRules();
-  lastLoadTime = Date.now();
+async function getRules(): Promise<{ [filename: string]: Rule }> {
+  cachedRules = await fetchRulesFromGitHub();
   return cachedRules;
 }
 
 /**
- * Set up file system watcher for the rules directory
+ * Set up polling for GitHub changes
  */
-function setupFileWatcher() {
-  try {
-    if (!fs.existsSync(RULES_DIR)) {
-      console.error(`Rules directory does not exist for watching: ${RULES_DIR}`);
-      return;
-    }
-
-    const watcher = fs.watch(RULES_DIR, { recursive: false }, (eventType, filename) => {
-      if (filename && filename.endsWith('.md')) {
-        console.error(`Rules file ${eventType}: ${filename} - cache will be refreshed on next request`);
-        // Cache will be refreshed on next request due to getRules() always reloading
+function setupGitHubPolling() {
+  console.error(`Setting up GitHub polling every ${POLL_INTERVAL / 1000} seconds`);
+  
+  const pollInterval = setInterval(async () => {
+    try {
+      console.error('Polling GitHub for rule changes...');
+      const newRules = await fetchRulesFromGitHub();
+      
+      // Check if rules have changed
+      const oldKeys = Object.keys(cachedRules).sort();
+      const newKeys = Object.keys(newRules).sort();
+      
+      if (JSON.stringify(oldKeys) !== JSON.stringify(newKeys)) {
+        console.error('Rules list changed - cache updated');
+      } else {
+        // Check for content changes
+        for (const key of oldKeys) {
+          if (cachedRules[key]?.sha !== newRules[key]?.sha) {
+            console.error(`Rule ${key} content changed - cache updated`);
+            break;
+          }
+        }
       }
-    });
-
-    console.error(`File watcher set up for rules directory: ${RULES_DIR}`);
-    
-    // Handle process termination
-    process.on('SIGINT', () => {
-      watcher.close();
-      process.exit(0);
-    });
-    
-    process.on('SIGTERM', () => {
-      watcher.close();
-      process.exit(0);
-    });
-    
-  } catch (error) {
-    console.error(`Error setting up file watcher:`, error);
-  }
+      
+      cachedRules = newRules;
+    } catch (error) {
+      console.error('Error during GitHub polling:', error);
+    }
+  }, POLL_INTERVAL);
+  
+  // Handle process termination
+  process.on('SIGINT', () => {
+    clearInterval(pollInterval);
+    process.exit(0);
+  });
+  
+  process.on('SIGTERM', () => {
+    clearInterval(pollInterval);
+    process.exit(0);
+  });
 }
 
 /**
@@ -136,7 +204,7 @@ function setupFileWatcher() {
 const server = new Server(
   {
     name: "roo-rules-server",
-    version: "0.1.0",
+    version: "0.2.0",
   },
   {
     capabilities: {
@@ -153,7 +221,7 @@ const server = new Server(
  * - Human readable name and description
  */
 server.setRequestHandler(ListResourcesRequestSchema, async () => {
-  const rules = getRules();
+  const rules = await getRules();
   
   return {
     resources: Object.entries(rules).map(([filename, rule]) => ({
@@ -173,7 +241,7 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
   const url = new URL(request.params.uri);
   const filename = url.pathname.replace(/^\//, '');
   
-  const rules = getRules();
+  const rules = await getRules();
   const rule = rules[filename];
 
   if (!rule) {
@@ -194,15 +262,16 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
  * This allows the server to communicate via standard input/output streams.
  */
 async function main() {
-  // Set up file system watcher
-  setupFileWatcher();
+  // Initialize rules cache from GitHub
+  console.error('Loading initial rules from GitHub...');
+  await getRules();
   
-  // Initialize rules cache
-  getRules();
+  // Set up GitHub polling for changes
+  setupGitHubPolling();
   
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error('Roo Rules MCP server running on stdio with file watching enabled');
+  console.error('Roo Rules MCP server running on stdio with GitHub polling enabled');
 }
 
 main().catch((error) => {
