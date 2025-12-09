@@ -11,6 +11,14 @@ If the user request is exactly "spec", then perform a spec coding:
 - if the spec intro mentions that the app is multi language, handle multi language UI with resource files (include English and Simplified Chinese by default). In the specs, any string with double quote is considered a resource that needs to be translated and put into the resource file
 - when you finish, do not try to test the implementation
 
+## 2. Tests
+
+If the user request is exactly "test", then generate and run tests:
+
+- read the markdown files under /specs, find all "Interaction" sections
+- generate test cases for each of those interactions
+- run the tests
+
 <!-- ## 1. File changes
 
 The goal here is to make the process automatic without user interaction
