@@ -56,10 +56,10 @@ Rules when creating new react project
   ...
 - define the connectDB function (save and reuse the db connection for future requests): for prod, connect to db {appName}, for qa, {appName}-qa, for local dev, {appName}-dev
 
-### 5. Create test data
+<!-- ### 5. Create test data
 
 - server side: create api handlers getTodos, updateTodo to read and save data to db
 - server side: create some test data in the todo collection in db, which represents some todo list items. Create a API for running the seed function, and call it using curl.
-- client side: create a todo list component where you can add, update and delete an todo item, and put it in the home page
+- client side: create a todo list component where you can add, update and delete an todo item, and put it in the home page -->
 <!-- - create test cases for the todo component use cases
 - run the tests -->
