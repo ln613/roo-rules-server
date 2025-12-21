@@ -43,7 +43,7 @@ Rules when creating new react project
   5. connect to db (see next section)
   5. get the relevant data from params/body and call the corresponding handler for the method/type
 - Install netlify cli, and create an npm start script, which starts both the local netlify functions (on port 8888) and the vite dev server (on port 5173)
-- in netlify.toml, specify port = 8888 (do not add targetPort)
+- in netlify.toml, specify port = 8888 (do not add targetPort), do not use esbuild
 - When the client calls the api, for local dev, use host http://localhost:8888, for qa/prod, use the same site
 
 ### 4. Setup MongoDB
